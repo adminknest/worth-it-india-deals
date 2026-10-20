@@ -22,9 +22,7 @@ class PolicyTests(unittest.TestCase):
 
 class StoreTests(unittest.TestCase):
     def test_transaction_upsert_is_idempotent(self):
-        data_dir = Path(__file__).parent / "data"
-        data_dir.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=data_dir) as directory:
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as directory:
             store = AffiliateStore(Path(directory) / "affiliate.db")
             first = {"id": 1, "campaign_id": 9, "status": "pending", "user_commission": "10.00", "updated_at": "2026-01-01T00:00:00Z"}
             second = {**first, "status": "validated", "user_commission": "12.50", "updated_at": "2026-01-02T00:00:00Z"}

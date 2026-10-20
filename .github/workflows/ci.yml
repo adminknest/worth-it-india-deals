@@ -12,8 +12,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Compile
@@ -22,5 +22,9 @@ jobs:
         run: python -m unittest -v test_dealbot.py test_earnkaro_intake.py test_operator_bot.py test_cuelinks_client.py
       - name: Ensure secrets are not committed
         run: |
-          test ! -f config.json
-          test ! -d data
+          tracked="$(git ls-files 'config.json' '.env' '.env.*' 'data/**')"
+          if [ -n "$tracked" ]; then
+            echo "Sensitive runtime paths are tracked:"
+            echo "$tracked"
+            exit 1
+          fi
