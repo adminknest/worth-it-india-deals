@@ -1,0 +1,2 @@
+event_id,occurred_at,product_key,merchant,order_amount,commission_amount,status
+example-order-1,2026-10-20T10:00:00+00:00,amazon:B0EXAMPLE,Amazon,699,38.45,pending

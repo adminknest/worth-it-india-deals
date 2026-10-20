@@ -1,0 +1,21 @@
+app = "worth-it-india-deals"
+primary_region = "bom"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  DEALBOT_DATABASE = "/data/deals.db"
+
+[processes]
+  worker = "python operator_bot.py --config config.production.json --auto-publish"
+
+[[mounts]]
+  source = "worth_it_india_data"
+  destination = "/data"
+  processes = ["worker"]
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
+  processes = ["worker"]

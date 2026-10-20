@@ -1,0 +1,4 @@
+source,merchant,product_id,title,url,price,mrp,category,in_stock,observed_at,rating_count,commission_pct
+authorized-manual-feed,Myntra,15579796,Bombay Shaving Company Power Styler beard trimmer,https://www.myntra.com/15579796,699,1199,Gadgets,true,,10900,8
+authorized-manual-feed,Myntra,11401774,Roadster women black solid round-neck T-shirt,https://www.myntra.com/11401774,224,899,Fashion,true,,4000,8
+authorized-manual-feed,Myntra,11893772,Roadster women olive green T-shirt,https://www.myntra.com/11893772,179,599,Fashion,false,,4100,8
