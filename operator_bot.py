@@ -129,7 +129,11 @@ def handle_command(text: str, chat_id: int, user_id: int, config: dict, store) -
 
 def poll_once(config: dict, store) -> int:
     offset = int(store.state("telegram_update_offset", "0"))
-    updates = api_call("getUpdates", {"offset": offset, "timeout": 20, "allowed_updates": json.dumps(["message"])})
+    poll_timeout = max(1, min(20, int(config.get("telegram_poll_timeout_seconds", 5))))
+    updates = api_call(
+        "getUpdates",
+        {"offset": offset, "timeout": poll_timeout, "allowed_updates": json.dumps(["message"])},
+    )
     for update in updates:
         offset = max(offset, int(update["update_id"]) + 1)
         message = update.get("message") or {}
@@ -150,7 +154,6 @@ def main(argv: list[str] | None = None) -> int:
     config, store = store_from_config(Path(args.config).resolve())
     owner = f"operator-{uuid.uuid4()}"
     last_ingest = 0.0
-    last_publish_check = 0.0
     while True:
         try:
             if not store.acquire_lease("telegram-operator", owner, 60):
@@ -161,10 +164,11 @@ def main(argv: list[str] | None = None) -> int:
                 ingest(args.source, config, store)
                 last_ingest = time.monotonic()
             expire_amazon_content(store)
-            poll_once(config, store)
-            if args.auto_publish and time.monotonic() - last_publish_check >= int(config["scan_interval_seconds"]):
+            # The store enforces the public post interval. Checking before long polling
+            # keeps scheduler drift small when the approved queue has inventory.
+            if args.auto_publish:
                 publish_once(config, store, dry_run=False)
-                last_publish_check = time.monotonic()
+            poll_once(config, store)
         except Exception as exc:
             store.incident("warning", "telegram-operator", exc)
             print(f"operator cycle failed: {exc}", file=sys.stderr)

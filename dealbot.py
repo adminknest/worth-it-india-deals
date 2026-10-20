@@ -138,6 +138,7 @@ def load_config(path: Path) -> dict:
         "database": "data/deals.db",
         "scan_interval_seconds": 60,
         "post_interval_seconds": 60,
+        "telegram_poll_timeout_seconds": 5,
         "max_posts_per_day": 720,
         "repost_cooldown_hours": 72,
         "freshness_minutes": 30,
