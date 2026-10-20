@@ -139,6 +139,9 @@ def load_config(path: Path) -> dict:
         "scan_interval_seconds": 60,
         "post_interval_seconds": 60,
         "telegram_poll_timeout_seconds": 5,
+        "queue_starvation_alert_minutes": 60,
+        "queue_starvation_repeat_minutes": 360,
+        "growth_snapshot_interval_minutes": 360,
         "max_posts_per_day": 720,
         "repost_cooldown_hours": 72,
         "freshness_minutes": 30,
@@ -252,6 +255,13 @@ class Store:
                 status TEXT NOT NULL DEFAULT 'open',
                 created_at TEXT NOT NULL,
                 resolved_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS growth_snapshots (
+                observed_at TEXT PRIMARY KEY,
+                subscriber_count INTEGER NOT NULL,
+                posted_total INTEGER NOT NULL,
+                fresh_queue INTEGER NOT NULL,
+                confirmed_commission REAL NOT NULL DEFAULT 0
             );
             """
         )
@@ -455,12 +465,13 @@ class Store:
         row = self.db.execute("SELECT value FROM operator_state WHERE name=?", (name,)).fetchone()
         return row[0] if row else default
 
-    def set_state(self, name: str, value: str) -> None:
+    def set_state(self, name: str, value: str, *, audit: bool = True) -> None:
         self.db.execute(
             "INSERT OR REPLACE INTO operator_state(name,value,updated_at) VALUES (?,?,?)",
             (name, value, now_utc().isoformat()),
         )
-        self.audit("operator", "operator_state.changed", None, {"name": name, "value": value})
+        if audit:
+            self.audit("operator", "operator_state.changed", None, {"name": name, "value": value})
         self.db.commit()
 
     def acquire_lease(self, name: str, owner: str, ttl_seconds: int = 90) -> bool:
@@ -483,6 +494,21 @@ class Store:
         )
         self.audit("pipeline", "incident.opened", None, {"severity": severity, "component": component, "error_class": type(exc).__name__})
         self.db.commit()
+
+    def resolve_incidents(self, component: str, severity: str = "warning") -> int:
+        now = now_utc().isoformat()
+        cursor = self.db.execute(
+            """UPDATE incidents SET status='resolved',resolved_at=?
+               WHERE component=? AND severity=? AND status='open'""",
+            (now, component, severity),
+        )
+        if cursor.rowcount:
+            self.audit(
+                "pipeline", "incidents.resolved", None,
+                {"component": component, "severity": severity, "count": cursor.rowcount},
+            )
+        self.db.commit()
+        return cursor.rowcount
 
     def doctor(self, config: dict) -> dict:
         integrity = self.db.execute("PRAGMA integrity_check").fetchone()[0]
@@ -507,6 +533,27 @@ class Store:
                AND (price>0 OR mrp>0)""",
             (amazon_cutoff,),
         ).fetchone()[0]
+        open_incidents = self.db.execute(
+            "SELECT COUNT(*) FROM incidents WHERE status='open'"
+        ).fetchone()[0]
+        open_critical_incidents = self.db.execute(
+            "SELECT COUNT(*) FROM incidents WHERE status='open' AND severity='critical'"
+        ).fetchone()[0]
+        fresh_queue = self.publishable_count(config)
+        last_post = self.db.execute(
+            "SELECT posted_at FROM deals WHERE status='posted' ORDER BY posted_at DESC LIMIT 1"
+        ).fetchone()
+        last_posted_at = last_post[0] if last_post else None
+        starvation_minutes = int(config.get("queue_starvation_alert_minutes", 60))
+        queue_starved = fresh_queue == 0 and bool(
+            last_posted_at
+            and now_utc() - parse_time(last_posted_at) >= timedelta(minutes=starvation_minutes)
+        )
+        heartbeat = self.state("operator_last_cycle_at", "") or None
+        heartbeat_stale = bool(
+            heartbeat
+            and now_utc() - parse_time(heartbeat) > timedelta(seconds=120)
+        )
         checks = {
             "database_integrity": integrity,
             "foreign_key_errors": foreign_keys,
@@ -516,6 +563,13 @@ class Store:
             "invalid_approvals": invalid_approvals,
             "orphan_approval_flags": orphan_approval_flags,
             "expired_amazon_price_records": expired_amazon_prices,
+            "open_incidents": open_incidents,
+            "open_critical_incidents": open_critical_incidents,
+            "fresh_approved_queue": fresh_queue,
+            "last_posted_at": last_posted_at,
+            "queue_starved": queue_starved,
+            "operator_last_cycle_at": heartbeat,
+            "operator_heartbeat_stale": heartbeat_stale,
             "paused": self.state("paused", "0") == "1",
         }
         checks["healthy"] = (
@@ -523,6 +577,8 @@ class Store:
             and uncertain == 0 and stale_sending == 0 and invalid_approvals == 0
             and orphan_approval_flags == 0
             and expired_amazon_prices == 0
+            and open_critical_incidents == 0
+            and not heartbeat_stale
         )
         return checks
 
@@ -588,13 +644,14 @@ class Store:
         self.audit(actor, "publication.reconciled", attempt["product_key"], {"attempt": attempt_key, "outcome": outcome, "message_id": message_id})
         self.db.commit()
 
-    def next_publishable(self, config: dict) -> sqlite3.Row | None:
+    def publishable_rows(self, config: dict) -> list[sqlite3.Row]:
         cutoff = now_utc() - timedelta(minutes=int(config["freshness_minutes"]))
         rows = self.db.execute(
             """SELECT * FROM deals
                WHERE status='active' AND approved=1 AND affiliate_url IS NOT NULL
                ORDER BY score DESC, observed_at DESC"""
         ).fetchall()
+        publishable = []
         for row in rows:
             approval = self.db.execute("SELECT deal_fingerprint FROM approvals WHERE product_key=?", (row["product_key"],)).fetchone()
             evidence = self.latest_evidence(row["product_key"])
@@ -605,8 +662,15 @@ class Store:
             if not evidence["in_stock"] or abs(float(evidence["price"]) - float(row["price"])) > 0.009:
                 continue
             if parse_time(row["observed_at"]) >= cutoff:
-                return row
-        return None
+                publishable.append(row)
+        return publishable
+
+    def publishable_count(self, config: dict) -> int:
+        return len(self.publishable_rows(config))
+
+    def next_publishable(self, config: dict) -> sqlite3.Row | None:
+        rows = self.publishable_rows(config)
+        return rows[0] if rows else None
 
     def can_post(self, config: dict) -> tuple[bool, str | None]:
         today = now_utc().date().isoformat()

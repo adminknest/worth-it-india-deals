@@ -8,6 +8,8 @@ python earnkaro_intake.py readiness
 python earnkaro_intake.py dashboard
 ```
 
+In the private operator bot, `/growth` records the current subscriber count and reports progress toward 1,000 subscribers. `/status` includes the fresh queue, worker heartbeat and open incident count. Queue-starvation alerts are private and rate-limited; they are not posted to the public channel.
+
 Do not start the publisher if `doctor` reports `healthy: false`. Inspect uncertain attempts and incidents first.
 
 ## Normal EarnKaro flow

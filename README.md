@@ -52,7 +52,7 @@ Remove `--dry-run` only after the bot is an administrator in the Telegram channe
 
 ### Telegram admin control
 
-Set `TG_ADMIN_USER_ID` to the owner's numeric Telegram user ID, then run `python operator_bot.py --source candidates.csv`. The owner can use `/queue`, `/approve KEY`, `/reject KEY`, `/publish`, `/pause`, `/resume`, `/doctor` and `/status` in the private bot chat. Commands from every other Telegram account are ignored.
+Set `TG_ADMIN_USER_ID` to the owner's numeric Telegram user ID, then run `python operator_bot.py --source candidates.csv`. The owner can use `/queue`, `/approve KEY`, `/reject KEY`, `/publish`, `/pause`, `/resume`, `/doctor`, `/growth` and `/status` in the private bot chat. Commands from every other Telegram account are ignored. The worker records subscriber snapshots every six hours and privately warns the owner when the verified queue remains empty.
 
 A network timeout during publication pauses the operator and marks the send `uncertain`, preventing an automatic retry from creating a duplicate post.
 

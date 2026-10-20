@@ -12,9 +12,10 @@ import time
 import urllib.parse
 import urllib.request
 import uuid
+from datetime import timedelta
 from pathlib import Path
 
-from dealbot import expire_amazon_content, format_post, ingest, publish_once, store_from_config
+from dealbot import expire_amazon_content, format_post, ingest, now_utc, parse_time, publish_once, store_from_config
 from earnkaro_intake import ensure_schema as ensure_earnkaro_schema
 from earnkaro_intake import record_verified_deal
 
@@ -36,21 +37,93 @@ def reply(chat_id: int, text: str) -> None:
     api_call("sendMessage", {"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
 
 
-def status_text(store) -> str:
-    queued = store.db.execute(
-        """SELECT COUNT(*) FROM deals d JOIN approvals a ON a.product_key=d.product_key
-           WHERE d.status='active' AND d.approved=1 AND d.affiliate_url IS NOT NULL
-             AND a.deal_fingerprint=d.deal_fingerprint"""
-    ).fetchone()[0]
+def status_text(store, config: dict) -> str:
+    queued = store.publishable_count(config)
     pending = store.db.execute("SELECT COUNT(*) FROM deals WHERE status='active' AND approved=0").fetchone()[0]
     posted = store.db.execute("SELECT COUNT(*) FROM deals WHERE status='posted'").fetchone()[0]
     uncertain = store.db.execute("SELECT COUNT(*) FROM publication_attempts WHERE state='uncertain'").fetchone()[0]
+    open_incidents = store.db.execute("SELECT COUNT(*) FROM incidents WHERE status='open'").fetchone()[0]
+    last_post = store.db.execute(
+        "SELECT posted_at FROM deals WHERE status='posted' ORDER BY posted_at DESC LIMIT 1"
+    ).fetchone()
+    last_posted_at = last_post[0] if last_post else "never"
+    heartbeat = store.state("operator_last_cycle_at", "never")
     return (
         f"<b>Worth It India operator</b>\n"
         f"Paused: {'yes' if store.state('paused', '0') == '1' else 'no'}\n"
         f"Pending review: {pending}\nQueued: {queued}\nPosted: {posted}\nUncertain sends: {uncertain}\n"
+        f"Open incidents: {open_incidents}\nLast post: {html.escape(last_posted_at)}\n"
+        f"Last worker cycle: {html.escape(heartbeat)}\n"
         f"Audit chain: {'valid' if store.verify_audit_chain() else 'BROKEN'}"
     )
+
+
+def record_growth_snapshot(config: dict, store, *, force: bool = False) -> dict | None:
+    interval = timedelta(minutes=int(config.get("growth_snapshot_interval_minutes", 360)))
+    last_attempt = store.state("growth_snapshot_last_attempt_at", "")
+    if not force and last_attempt and now_utc() - parse_time(last_attempt) < interval:
+        return None
+    store.set_state("growth_snapshot_last_attempt_at", now_utc().isoformat(), audit=False)
+    channel_id = os.environ.get("TG_CHANNEL_ID", "")
+    if not channel_id:
+        raise RuntimeError("TG_CHANNEL_ID is required for subscriber metrics")
+    subscribers = int(api_call("getChatMemberCount", {"chat_id": channel_id}))
+    posted = int(store.db.execute("SELECT COUNT(*) FROM deals WHERE status='posted'").fetchone()[0])
+    fresh_queue = store.publishable_count(config)
+    commission_table = store.db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='commission_events'"
+    ).fetchone()
+    confirmed = 0.0
+    if commission_table:
+        confirmed = float(store.db.execute(
+            "SELECT COALESCE(SUM(commission_amount),0) FROM commission_events WHERE status IN ('confirmed','paid')"
+        ).fetchone()[0])
+    observed_at = now_utc().isoformat()
+    store.db.execute(
+        """INSERT INTO growth_snapshots
+           (observed_at,subscriber_count,posted_total,fresh_queue,confirmed_commission)
+           VALUES (?,?,?,?,?)""",
+        (observed_at, subscribers, posted, fresh_queue, confirmed),
+    )
+    store.db.commit()
+    return {
+        "observed_at": observed_at,
+        "subscriber_count": subscribers,
+        "posted_total": posted,
+        "fresh_queue": fresh_queue,
+        "confirmed_commission": confirmed,
+    }
+
+
+def maybe_alert_queue_starvation(config: dict, store) -> bool:
+    if store.publishable_count(config) > 0:
+        return False
+    threshold = int(config.get("queue_starvation_alert_minutes", 60))
+    repeat = int(config.get("queue_starvation_repeat_minutes", 360))
+    last_post = store.db.execute(
+        "SELECT posted_at FROM deals WHERE status='posted' ORDER BY posted_at DESC LIMIT 1"
+    ).fetchone()
+    empty_since = parse_time(last_post[0]) if last_post else parse_time(
+        store.state("queue_empty_since", now_utc().isoformat())
+    )
+    if not store.state("queue_empty_since", ""):
+        store.set_state("queue_empty_since", empty_since.isoformat(), audit=False)
+    if now_utc() - empty_since < timedelta(minutes=threshold):
+        return False
+    last_alert = store.state("queue_starvation_last_alert_at", "")
+    if last_alert and now_utc() - parse_time(last_alert) < timedelta(minutes=repeat):
+        return False
+    admin_chat = os.environ.get("TG_ADMIN_USER_ID", "")
+    if not admin_chat:
+        return False
+    reply(
+        int(admin_chat),
+        "<b>Worth It India inventory alert</b>\n"
+        "The verified publishing queue is empty. The worker is running, but it has nothing compliant to post. "
+        "Add current merchant evidence and an authorized affiliate link before approving the next item.",
+    )
+    store.set_state("queue_starvation_last_alert_at", now_utc().isoformat(), audit=False)
+    return True
 
 
 def handle_command(text: str, chat_id: int, user_id: int, config: dict, store) -> None:
@@ -61,9 +134,19 @@ def handle_command(text: str, chat_id: int, user_id: int, config: dict, store) -
     command = parts[0].split("@", 1)[0].lower()
     raw_payload = text.strip().partition(" ")[2].strip()
     if command in {"/start", "/help"}:
-        reply(chat_id, "Commands: /status, /doctor, /queue, /preview KEY, /record JSON, /approve KEY, /reject KEY, /publish, /pause, /resume")
+        reply(chat_id, "Commands: /status, /growth, /doctor, /queue, /preview KEY, /record JSON, /approve KEY, /reject KEY, /publish, /pause, /resume")
     elif command == "/status":
-        reply(chat_id, status_text(store))
+        reply(chat_id, status_text(store, config))
+    elif command == "/growth":
+        snapshot = record_growth_snapshot(config, store, force=True)
+        reply(
+            chat_id,
+            "<b>Worth It India growth</b>\n"
+            f"Subscribers: {snapshot['subscriber_count']:,} / 1,000\n"
+            f"Posted deals: {snapshot['posted_total']}\n"
+            f"Fresh queue: {snapshot['fresh_queue']}\n"
+            f"Confirmed commission: ₹{snapshot['confirmed_commission']:,.2f}",
+        )
     elif command == "/doctor":
         report = store.doctor(config)
         state = "healthy" if report["healthy"] else "needs attention"
@@ -140,7 +223,8 @@ def poll_once(config: dict, store) -> int:
         text = message.get("text", "")
         if text.startswith("/"):
             handle_command(text, int(message["chat"]["id"]), int(message.get("from", {}).get("id", 0)), config, store)
-    store.set_state("telegram_update_offset", str(offset))
+    store.set_state("telegram_update_offset", str(offset), audit=False)
+    store.resolve_incidents("telegram-operator", "warning")
     return len(updates)
 
 
@@ -160,6 +244,13 @@ def main(argv: list[str] | None = None) -> int:
                 print("operator cycle skipped: another operator owns the lease", file=sys.stderr)
                 time.sleep(5)
                 continue
+            store.set_state("operator_last_cycle_at", now_utc().isoformat(), audit=False)
+            try:
+                snapshot = record_growth_snapshot(config, store)
+                if snapshot is not None:
+                    store.resolve_incidents("growth-metrics", "warning")
+            except Exception as exc:
+                store.incident("warning", "growth-metrics", exc)
             if args.source and time.monotonic() - last_ingest >= int(config["scan_interval_seconds"]):
                 ingest(args.source, config, store)
                 last_ingest = time.monotonic()
@@ -168,6 +259,7 @@ def main(argv: list[str] | None = None) -> int:
             # keeps scheduler drift small when the approved queue has inventory.
             if args.auto_publish:
                 publish_once(config, store, dry_run=False)
+                maybe_alert_queue_starvation(config, store)
             poll_once(config, store)
         except Exception as exc:
             store.incident("warning", "telegram-operator", exc)
