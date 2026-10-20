@@ -35,6 +35,10 @@ class DealBotTests(unittest.TestCase):
         stale = candidate(observed_at=dealbot.now_utc() - timedelta(hours=2))
         self.assertEqual(dealbot.score_candidate(stale, CONFIG)[1], "stale price")
 
+    def test_amazon_prohibited_wording_is_rejected(self):
+        item = candidate(merchant="Amazon", title="Amazon loot bug deal")
+        self.assertEqual(dealbot.score_candidate(item, CONFIG)[1], "Amazon promotion wording is prohibited")
+
     def test_upsert_deduplicates_by_merchant_product_id(self):
         with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as tmp:
             store = dealbot.Store(Path(tmp) / "deals.db")
@@ -142,6 +146,18 @@ class DealBotTests(unittest.TestCase):
             second_attempt = store.reserve_publication(store.get(item.key), "@worthit")
             self.assertIsNotNone(second_attempt)
             self.assertNotEqual(first_attempt, second_attempt)
+            store.db.close()
+
+    def test_amazon_price_content_is_purged_after_24_hours(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as tmp:
+            store = dealbot.Store(Path(tmp) / "deals.db")
+            item = candidate(merchant="Amazon", product_id="B0TEST", observed_at=dealbot.now_utc() - timedelta(hours=25))
+            store.upsert(item, 80, None)
+            store.record_evidence(item.key, item.url, "browser", item.observed_at, item.price, True, "ok")
+            self.assertEqual(dealbot.expire_amazon_content(store), 1)
+            row = store.get(item.key)
+            self.assertEqual((row["price"], row["mrp"], row["status"]), (0, 0, "expired"))
+            self.assertIsNone(store.latest_evidence(item.key))
             store.db.close()
 
 

@@ -14,7 +14,7 @@ import urllib.request
 import uuid
 from pathlib import Path
 
-from dealbot import format_post, ingest, publish_once, store_from_config
+from dealbot import expire_amazon_content, format_post, ingest, publish_once, store_from_config
 from earnkaro_intake import ensure_schema as ensure_earnkaro_schema
 from earnkaro_intake import record_verified_deal
 
@@ -160,6 +160,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.source and time.monotonic() - last_ingest >= int(config["scan_interval_seconds"]):
                 ingest(args.source, config, store)
                 last_ingest = time.monotonic()
+            expire_amazon_content(store)
             poll_once(config, store)
             if args.auto_publish and time.monotonic() - last_publish_check >= int(config["scan_interval_seconds"]):
                 publish_once(config, store, dry_run=False)

@@ -120,6 +120,10 @@ def score_candidate(candidate: Candidate, config: dict) -> tuple[float, str | No
         return 0.0, "discount below threshold"
     if candidate.rating_count < int(config["min_rating_count"]):
         return 0.0, "insufficient rating evidence"
+    if candidate.merchant.strip().lower() == "amazon":
+        words = {word.strip(".,!?:;()[]{}\"").lower() for word in candidate.title.split()}
+        if words & {"loot", "bug"}:
+            return 0.0, "Amazon promotion wording is prohibited"
 
     price_value = 12 if candidate.price <= 500 else 8 if candidate.price <= 1500 else 3
     social_proof = min(math.log10(candidate.rating_count + 1) * 5, 20)
@@ -406,7 +410,7 @@ class Store:
                VALUES (?,?,?,?,?,?,?,?,?)""",
             (key, canonical_source, evidence_type, observed_at.isoformat(), price, int(in_stock), note.strip(), evidence_hash, now_utc().isoformat()),
         )
-        self.audit(actor, "verification.recorded", key, {"evidence_hash": evidence_hash, "price": price, "in_stock": bool(in_stock)})
+        self.audit(actor, "verification.recorded", key, {"evidence_hash": evidence_hash, "in_stock": bool(in_stock)})
         self.db.commit()
         return evidence_hash
 
@@ -496,6 +500,12 @@ class Store:
             """SELECT COUNT(*) FROM deals d LEFT JOIN approvals a ON a.product_key=d.product_key
                WHERE d.approved=1 AND a.product_key IS NULL"""
         ).fetchone()[0]
+        amazon_cutoff = (now_utc() - timedelta(hours=24)).isoformat()
+        expired_amazon_prices = self.db.execute(
+            """SELECT COUNT(*) FROM deals WHERE lower(merchant)='amazon' AND observed_at<?
+               AND (price>0 OR mrp>0)""",
+            (amazon_cutoff,),
+        ).fetchone()[0]
         checks = {
             "database_integrity": integrity,
             "foreign_key_errors": foreign_keys,
@@ -504,14 +514,29 @@ class Store:
             "stale_sending_attempts": stale_sending,
             "invalid_approvals": invalid_approvals,
             "orphan_approval_flags": orphan_approval_flags,
+            "expired_amazon_price_records": expired_amazon_prices,
             "paused": self.state("paused", "0") == "1",
         }
         checks["healthy"] = (
             integrity == "ok" and foreign_keys == 0 and checks["audit_chain_valid"]
             and uncertain == 0 and stale_sending == 0 and invalid_approvals == 0
             and orphan_approval_flags == 0
+            and expired_amazon_prices == 0
         )
         return checks
+
+    def purge_amazon_price(self, key: str, actor: str = "retention-policy") -> None:
+        self.get(key)
+        self.db.execute("DELETE FROM approvals WHERE product_key=?", (key,))
+        self.db.execute("DELETE FROM verification_evidence WHERE product_key=?", (key,))
+        self.db.execute(
+            """UPDATE deals SET price=0,mrp=0,discount_pct=0,approved=0,status='expired',
+               rejection_reason='Amazon pricing content expired after 24 hours',updated_at=?
+               WHERE product_key=?""",
+            (now_utc().isoformat(), key),
+        )
+        self.audit(actor, "amazon.price_content_expired", key, {"retention_hours": 24})
+        self.db.commit()
 
     def reserve_publication(self, row: sqlite3.Row, destination: str) -> str | None:
         approval = self.db.execute(
@@ -669,7 +694,7 @@ def format_post(row: sqlite3.Row) -> str:
         f"Price seen: <b>₹{row['price']:,.0f}</b> | MRP: ₹{row['mrp']:,.0f} "
         f"({row['discount_pct']:.0f}% off)\n"
         f"Checked: {checked}. Price, stock and delivery can change.\n\n"
-        f"<a href=\"{html.escape(row['affiliate_url'], quote=True)}\">View deal</a>\n"
+        f"<a href=\"{html.escape(row['affiliate_url'], quote=True)}\">Buy on {html.escape(row['merchant'])}</a>\n"
         f"<i>Affiliate link — we may earn a commission at no extra cost to you.</i>"
     )
 
@@ -690,6 +715,45 @@ def telegram_send(text: str) -> str:
     if not result.get("ok"):
         raise RuntimeError(f"Telegram rejected the message: {result.get('description', 'unknown error')}")
     return str(result["result"]["message_id"])
+
+
+def telegram_delete(message_id: str) -> None:
+    token = os.environ.get("TG_BOT_TOKEN")
+    chat_id = os.environ.get("TG_CHANNEL_ID")
+    if not token or not chat_id:
+        raise RuntimeError("TG_BOT_TOKEN and TG_CHANNEL_ID are required")
+    endpoint = f"https://api.telegram.org/bot{token}/deleteMessage"
+    body = urllib.parse.urlencode({"chat_id": chat_id, "message_id": message_id}).encode()
+    request = urllib.request.Request(endpoint, data=body, method="POST")
+    with urllib.request.urlopen(request, timeout=30) as response:
+        result = json.loads(response.read().decode("utf-8"))
+    if not result.get("ok"):
+        raise RuntimeError(f"Telegram rejected message expiry: {result.get('description', 'unknown error')}")
+
+
+def expire_amazon_content(store: Store, dry_run: bool = False) -> int:
+    cutoff = now_utc() - timedelta(hours=24)
+    rows = store.db.execute(
+        """SELECT * FROM deals WHERE lower(merchant)='amazon' AND observed_at<?
+           AND (price>0 OR mrp>0) ORDER BY observed_at""",
+        (cutoff.isoformat(),),
+    ).fetchall()
+    expired = 0
+    for row in rows:
+        if dry_run:
+            print(f"Would expire Amazon price content for {row['product_key']}")
+            expired += 1
+            continue
+        if row["status"] == "posted" and row["telegram_message_id"]:
+            try:
+                telegram_delete(row["telegram_message_id"])
+            except Exception as exc:
+                store.set_state("paused", "1")
+                store.incident("critical", "amazon-content-expiry", exc)
+                raise RuntimeError("Could not remove expired Amazon pricing content; operator paused") from exc
+        store.purge_amazon_price(row["product_key"])
+        expired += 1
+    return expired
 
 
 def store_from_config(config_path: Path) -> tuple[dict, Store]:
@@ -812,6 +876,7 @@ def main(argv: list[str] | None = None) -> int:
         while True:
             try:
                 if store.acquire_lease("publisher", owner, max(90, int(config["scan_interval_seconds"]) * 2)):
+                    expire_amazon_content(store, dry_run=args.dry_run)
                     ingest(args.source, config, store)
                     publish_once(config, store, args.dry_run)
                 else:

@@ -45,6 +45,8 @@ The worker uses the 256 MB shared CPU configuration and mounts SQLite at `/data/
 
 Then run `/preview amazon:B0EXAMPLE` and `/approve amazon:B0EXAMPLE`. The worker publishes only while the deal and its evidence remain fresh.
 
+Amazon posts explicitly say “Buy on Amazon.” The worker removes a posted Amazon message and purges its product-price evidence after 24 hours, matching the current EarnKaro Amazon terms. The bot must retain permission to delete channel messages for this control to work.
+
 ## Rollback
 
 Redeploy the last known-good Git commit. If the database is involved, pause through `/pause`, preserve the volume, inspect incidents and restore a verified SQLite backup before resuming.

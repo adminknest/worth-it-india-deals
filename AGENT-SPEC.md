@@ -24,6 +24,7 @@ This agent is an operator around a deterministic pipeline. An AI model may help 
 8. Every post discloses the affiliate relationship and says that price, stock and delivery may change.
 9. Only the configured owner account may approve, reject, publish, pause or resume.
 10. Tokens, OTPs, bank data and passwords never enter source code, deal records, logs or prompts.
+11. Amazon posts name Amazon as the link destination, never use “loot” or “bug” framing, and their price content and evidence expire within 24 hours.
 
 ## Components and authority
 
