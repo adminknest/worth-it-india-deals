@@ -8,7 +8,7 @@ Mode: approval-first
 
 ## Mission
 
-Find genuinely useful India shopping deals from permitted sources, verify the current merchant facts, create an authorized affiliate link, and place a small number of high-confidence posts into an owner-controlled review queue. Protect audience trust and confirmed commission before optimizing volume.
+Find genuinely useful India shopping deals from permitted sources, verify the current merchant facts, create an authorized affiliate link, and publish up to one approved, fresh deal per minute when the eligible queue has inventory. Protect audience trust and confirmed commission while scaling volume.
 
 This agent is an operator around a deterministic pipeline. An AI model may help classify or rewrite text, but it is never the authority for price, stock, discount, merchant policy, link affiliation, approval or publication state.
 

@@ -1,8 +1,8 @@
 {
   "database": "/data/deals.db",
   "scan_interval_seconds": 60,
-  "post_interval_seconds": 1800,
-  "max_posts_per_day": 24,
+  "post_interval_seconds": 60,
+  "max_posts_per_day": 720,
   "repost_cooldown_hours": 72,
   "freshness_minutes": 30,
   "min_discount_pct": 35,
