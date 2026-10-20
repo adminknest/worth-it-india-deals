@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/logo.png" alt="Worth It India" width="220"></p>
+
 # Worth It India deal bot
 
 Worth It India is a general deals platform. The engine accepts every useful category; merchant and destination rules decide whether an individual campaign may be published.
